@@ -1,0 +1,194 @@
+# Nama Workflow: Final Lengkap untuk Kriteria Basic, Skilled, Advanced
+name: 'ML Model CI Workflow (Final)'
+
+# Trigger: Dijalankan saat ada perubahan di MLProject atau file workflow itu sendiri,
+# atau dapat dijalankan secara manual
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'MLProject/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Tahap 1: Mengambil kode dari repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Ensure Git LFS assets are pulled
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y git-lfs
+          git lfs install
+          git lfs fetch --all
+          git lfs pull
+
+
+      # Tahap 2: Menyiapkan lingkungan Conda dan Python
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          python-version: "3.12"
+          
+      # Tahap 3: Menginstal semua dependensi dari file environment.yml
+      - name: Install dependencies
+        run: conda env create -f MLProject/environment.yml --name mlflow-netflix-cc-env
+        
+      # Tahap 4: Menjalankan skrip training model (Memenuhi Kriteria BASIC)
+      - name: Run training script
+        shell: bash -l {0} # Diperlukan agar `conda run` dapat diakses
+        run: |
+          echo "[BASIC] Memulai training model..."
+          # Menjalankan MLflow menunjuk ke folder proyek Anda
+          conda run -n mlflow-netflix-cc-env mlflow run MLProject --env-manager=local
+          echo "[BASIC] Training selesai."
+
+      # Tahap 5: Zip dan Unggah Artefak ke Google Drive (Memenuhi Kriteria SKILLED)
+      # --- BAGIAN INI TELAH DIPERBAIKI ---
+      - name: Zip artifacts for Google Drive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y zip
+          zip -r ml-artifacts-gdrive.zip mlruns/
+
+      - name: Upload artifact to Shared Drive via Service Account
+        env:
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          GDRIVE_PARENT_ID: ${{ secrets.GDRIVE_PARENT_ID }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          python3 -m venv .gdvenv
+          source .gdvenv/bin/activate
+          pip install --upgrade google-api-python-client google-auth google-auth-httplib2
+          python - << 'PY'
+          import json, os, sys, base64, pathlib
+          from google.oauth2.service_account import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          def load_sa_info(value: str):
+              v = value.strip()
+              # attempt direct JSON
+              try:
+                  return json.loads(v)
+              except Exception:
+                  pass
+              # attempt base64-encoded JSON
+              try:
+                  decoded = base64.b64decode(v).decode('utf-8')
+                  return json.loads(decoded)
+              except Exception:
+                  pass
+              # attempt file path (if someone put a repo path)
+              p = pathlib.Path(v)
+              if p.suffix.lower() == '.json' and p.exists():
+                  with p.open('r', encoding='utf-8') as f:
+                      return json.load(f)
+              raise ValueError("Provided GOOGLE_DRIVE_CREDENTIALS is neither valid JSON nor base64 JSON; and not a readable JSON file path.")
+
+          # Validate secrets
+          creds_raw = os.environ.get('GOOGLE_DRIVE_CREDENTIALS', '').strip()
+          folder_id = os.environ.get('GDRIVE_PARENT_ID', '').strip()
+          if not creds_raw:
+              print("ERROR: Secret GOOGLE_DRIVE_CREDENTIALS is empty or not set. Add your Service Account JSON key to repository Secrets.")
+              sys.exit(1)
+          if not folder_id:
+              print("ERROR: Secret GDRIVE_PARENT_ID is empty or not set. Add the target Shared Drive folder ID to repository Secrets.")
+              sys.exit(1)
+
+          try:
+              creds_info = load_sa_info(creds_raw)
+          except Exception as e:
+              print(f"ERROR: Failed to read GOOGLE_DRIVE_CREDENTIALS: {e}")
+              print("Tips:")
+              print(" - Paste the full Service Account JSON key content into the secret (starting with { ... }).")
+              print(" - Or store a BASE64 of the JSON key and set that as the secret.")
+              print(" - Do NOT set a local file path; runners won't have your local file.")
+              sys.exit(1)
+
+          creds = Credentials.from_service_account_info(
+              creds_info,
+              scopes=['https://www.googleapis.com/auth/drive']
+          )
+          service = build('drive', 'v3', credentials=creds)
+
+          name = f"ml-artifacts-{os.environ.get('GITHUB_SHA')}.zip"
+          artifact_path = 'ml-artifacts-gdrive.zip'
+          if not os.path.exists(artifact_path):
+              print(f"ERROR: Artifact '{artifact_path}' not found. Ensure the zip step ran successfully.")
+              sys.exit(1)
+
+          media = MediaFileUpload(artifact_path, mimetype='application/zip', resumable=True)
+          file = service.files().create(
+              body={'name': name, 'parents': [folder_id]},
+              media_body=media,
+              fields='id',
+              supportsAllDrives=True
+          ).execute()
+          print(f"Uploaded file ID: {file['id']}")
+          PY
+
+      # Tahap 6: Build dan Push Docker Image (Memenuhi Kriteria ADVANCED)
+      - name: Build and Push Docker Image
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          export PYTHONNOUSERSITE=1
+          echo "[ADVANCED] Memulai proses build dan push Docker image..."
+          
+          # 1. Login ke Docker Hub
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          
+          # 2. Temukan Run ID terbaru dari hasil training
+          LATEST_RUN_ID=$(ls -t mlruns/0 | head -n 1)
+          
+          # 3. Definisikan Model URI dan Nama Image Docker
+          MODEL_URI="mlruns/0/$LATEST_RUN_ID/artifacts/model"
+          IMAGE_NAME="$DOCKERHUB_USERNAME/netflix-cc-cicd"
+          
+          echo "Model URI: $MODEL_URI"
+          echo "Nama Docker Image: $IMAGE_NAME"
+
+          # 3.1 Pastikan versi protobuf kompatibel dengan MLflow di environment conda
+          conda run -n mlflow-netflix-cc-env pip install --upgrade "protobuf<4" "googleapis-common-protos<2"
+
+          # 4. Build Docker image menggunakan Dockerfile kustom untuk menghindari instalasi Python 3.8 via get-pip
+          DOCKER_DIR="mlflow_docker_ctx"
+          rm -rf "$DOCKER_DIR"
+          mkdir -p "$DOCKER_DIR/model"
+          cp -r "$MODEL_URI" "$DOCKER_DIR/model"
+          cat > "$DOCKER_DIR/Dockerfile" << 'EOF'
+          FROM python:3.12-slim
+          RUN apt-get update && apt-get install -y build-essential && rm -rf /var/lib/apt/lists/*
+          ENV PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1
+          WORKDIR /opt/app
+          RUN pip install --no-cache-dir \
+            mlflow==2.16.1 \
+            pandas==2.2.3 \
+            scikit-learn==1.6.1 \
+            "protobuf<4" \
+            "googleapis-common-protos<2"
+          COPY model /opt/model
+          EXPOSE 5000
+          CMD ["mlflow", "models", "serve", "-m", "/opt/model", "--env-manager", "local", "--host", "0.0.0.0", "--port", "5000"]
+          EOF
+
+          docker build -t "$IMAGE_NAME:latest" "$DOCKER_DIR"
+          
+          # 5. Push image ke Docker Hub
+          docker push "$IMAGE_NAME:latest"
+          
+          GIT_SHA=$(git rev-parse --short HEAD)
+          docker tag "$IMAGE_NAME:latest" "$IMAGE_NAME:$GIT_SHA"
+          docker push "$IMAGE_NAME:$GIT_SHA"
+          
+          echo "[ADVANCED] Docker image berhasil di-push ke Docker Hub."

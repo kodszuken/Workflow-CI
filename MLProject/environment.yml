@@ -1,0 +1,12 @@
+name: mlflow-netflix-cc-env
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+    - mlflow==2.16.1
+    - pandas==2.2.3
+    - scikit-learn==1.6.1
+    - protobuf<4
+    - googleapis-common-protos<2

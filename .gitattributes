@@ -1,0 +1,4 @@
+*.csv filter=lfs diff=lfs merge=lfs -text
+MLProject_folder/dataset_preprocessing/creditcard_processed.csv filter=lfs diff=lfs merge=lfs -text
+# Ignore MLflow local runs folder
+MLProject/mlruns/

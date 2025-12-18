@@ -1,0 +1,9 @@
+name: NetflixContentClassificationCI
+
+conda_env: environment.yml
+
+entry_points:
+  main:
+    parameters:
+      data_path: {type: string, default: "dataset_preprocessing/netflix_titles_processed.csv"}
+    command: "python modelling.py --data_path {data_path}"

@@ -1,0 +1,2 @@
+# Ignore local MLflow runs
+MLProject/mlruns/
