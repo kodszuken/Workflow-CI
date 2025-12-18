@@ -52,14 +52,13 @@ jobs:
           echo "[BASIC] Training selesai."
 
       # Tahap 5: Zip dan Unggah Artefak ke Google Drive (Memenuhi Kriteria SKILLED)
-      # --- BAGIAN INI TELAH DIPERBAIKI ---
       - name: Zip artifacts for Google Drive
         run: |
           sudo apt-get update -y
           sudo apt-get install -y zip
           zip -r ml-artifacts-gdrive.zip mlruns/
 
-      - name: Upload artifact to Shared Drive via Service Account
+      - name: Upload artifact to Google Drive via Service Account
         env:
           GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
           GDRIVE_PARENT_ID: ${{ secrets.GDRIVE_PARENT_ID }}
@@ -76,42 +75,34 @@ jobs:
 
           def load_sa_info(value: str):
               v = value.strip()
-              # attempt direct JSON
               try:
                   return json.loads(v)
               except Exception:
                   pass
-              # attempt base64-encoded JSON
               try:
                   decoded = base64.b64decode(v).decode('utf-8')
                   return json.loads(decoded)
               except Exception:
                   pass
-              # attempt file path (if someone put a repo path)
               p = pathlib.Path(v)
               if p.suffix.lower() == '.json' and p.exists():
                   with p.open('r', encoding='utf-8') as f:
                       return json.load(f)
               raise ValueError("Provided GOOGLE_DRIVE_CREDENTIALS is neither valid JSON nor base64 JSON; and not a readable JSON file path.")
 
-          # Validate secrets
           creds_raw = os.environ.get('GOOGLE_DRIVE_CREDENTIALS', '').strip()
           folder_id = os.environ.get('GDRIVE_PARENT_ID', '').strip()
           if not creds_raw:
-              print("ERROR: Secret GOOGLE_DRIVE_CREDENTIALS is empty or not set. Add your Service Account JSON key to repository Secrets.")
+              print("ERROR: Secret GOOGLE_DRIVE_CREDENTIALS is empty or not set.")
               sys.exit(1)
           if not folder_id:
-              print("ERROR: Secret GDRIVE_PARENT_ID is empty or not set. Add the target Shared Drive folder ID to repository Secrets.")
+              print("ERROR: Secret GDRIVE_PARENT_ID is empty or not set.")
               sys.exit(1)
 
           try:
               creds_info = load_sa_info(creds_raw)
           except Exception as e:
               print(f"ERROR: Failed to read GOOGLE_DRIVE_CREDENTIALS: {e}")
-              print("Tips:")
-              print(" - Paste the full Service Account JSON key content into the secret (starting with { ... }).")
-              print(" - Or store a BASE64 of the JSON key and set that as the secret.")
-              print(" - Do NOT set a local file path; runners won't have your local file.")
               sys.exit(1)
 
           creds = Credentials.from_service_account_info(
@@ -120,20 +111,37 @@ jobs:
           )
           service = build('drive', 'v3', credentials=creds)
 
-          name = f"ml-artifacts-{os.environ.get('GITHUB_SHA')}.zip"
+          # Create upload folder inside the shared folder
+          upload_folder_name = f"artifacts-{os.environ.get('GITHUB_SHA')[:8]}"
+          upload_folder = service.files().create(
+              body={
+                  'name': upload_folder_name,
+                  'parents': [folder_id],
+                  'mimeType': 'application/vnd.google-apps.folder'
+              },
+              supportsAllDrives=True,
+              fields='id'
+          ).execute()
+          upload_folder_id = upload_folder['id']
+          print(f"Created upload folder: {upload_folder_id}")
+
+          # Upload artifact zip
           artifact_path = 'ml-artifacts-gdrive.zip'
           if not os.path.exists(artifact_path):
-              print(f"ERROR: Artifact '{artifact_path}' not found. Ensure the zip step ran successfully.")
+              print(f"ERROR: Artifact '{artifact_path}' not found.")
               sys.exit(1)
 
           media = MediaFileUpload(artifact_path, mimetype='application/zip', resumable=True)
           file = service.files().create(
-              body={'name': name, 'parents': [folder_id]},
+              body={
+                  'name': f"ml-artifacts-{os.environ.get('GITHUB_SHA')}.zip",
+                  'parents': [upload_folder_id]
+              },
               media_body=media,
-              fields='id',
+              fields='id,name',
               supportsAllDrives=True
           ).execute()
-          print(f"Uploaded file ID: {file['id']}")
+          print(f"Uploaded: {file['name']} (ID: {file['id']})")
           PY
 
       # Tahap 6: Build dan Push Docker Image (Memenuhi Kriteria ADVANCED)
