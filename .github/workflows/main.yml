@@ -51,27 +51,91 @@ jobs:
           conda run -n mlflow-netflix-cc-env mlflow run MLProject --env-manager=local
           echo "[BASIC] Training selesai."
 
-      # Tahap 5: Zip dan Simpan Artefak (Memenuhi Kriteria SKILLED)
-      - name: Zip artifacts for GitHub Actions
+      # Tahap 5: Zip dan Upload Artefak ke Shared Drive (Memenuhi Kriteria SKILLED)
+      - name: Zip artifacts
         run: |
           sudo apt-get update -y
           sudo apt-get install -y zip
           zip -r ml-artifacts.zip mlruns/
           echo "✓ Artifacts zipped successfully"
 
-      - name: Upload artifacts to GitHub Actions
+      - name: Upload artifacts to Shared Drive via Service Account
+        env:
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          GDRIVE_PARENT_ID: ${{ secrets.GDRIVE_PARENT_ID }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          python3 -m venv .gdvenv
+          source .gdvenv/bin/activate
+          pip install --upgrade google-api-python-client google-auth google-auth-httplib2
+          python - << 'PY'
+          import json, os, sys, base64, pathlib
+          from google.oauth2.service_account import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          def load_sa_info(value: str):
+              v = value.strip()
+              try:
+                  return json.loads(v)
+              except Exception:
+                  pass
+              try:
+                  decoded = base64.b64decode(v).decode('utf-8')
+                  return json.loads(decoded)
+              except Exception:
+                  pass
+              p = pathlib.Path(v)
+              if p.suffix.lower() == '.json' and p.exists():
+                  with p.open('r', encoding='utf-8') as f:
+                      return json.load(f)
+              raise ValueError("Invalid GOOGLE_DRIVE_CREDENTIALS format")
+
+          creds_raw = os.environ.get('GOOGLE_DRIVE_CREDENTIALS', '').strip()
+          folder_id = os.environ.get('GDRIVE_PARENT_ID', '').strip()
+          
+          if not creds_raw or not folder_id:
+              print("ERROR: Missing GOOGLE_DRIVE_CREDENTIALS or GDRIVE_PARENT_ID")
+              sys.exit(1)
+
+          try:
+              creds_info = load_sa_info(creds_raw)
+          except Exception as e:
+              print(f"ERROR: Failed to parse GOOGLE_DRIVE_CREDENTIALS: {e}")
+              sys.exit(1)
+
+          creds = Credentials.from_service_account_info(
+              creds_info,
+              scopes=['https://www.googleapis.com/auth/drive']
+          )
+          service = build('drive', 'v3', credentials=creds)
+
+          artifact_path = 'ml-artifacts.zip'
+          if not os.path.exists(artifact_path):
+              print(f"ERROR: Artifact '{artifact_path}' not found")
+              sys.exit(1)
+
+          media = MediaFileUpload(artifact_path, mimetype='application/zip', resumable=True)
+          file = service.files().create(
+              body={
+                  'name': f"ml-artifacts-{os.environ.get('GITHUB_SHA')[:8]}.zip",
+                  'parents': [folder_id]
+              },
+              media_body=media,
+              fields='id,name',
+              supportsAllDrives=True
+          ).execute()
+          print(f"✓ Uploaded: {file['name']} (ID: {file['id']})")
+          print(f"✓ Shared Drive: https://drive.google.com/drive/folders/{folder_id}")
+          PY
+
+      - name: Also upload to GitHub Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ml-artifacts-${{ github.sha }}
           path: ml-artifacts.zip
           retention-days: 30
         if: always()
-        
-      - name: Display artifact download info
-        run: |
-          echo "✓ Artifacts available for download in GitHub Actions > Artifacts section"
-          echo "  Artifact name: ml-artifacts-${{ github.sha }}"
-          echo "  Retention: 30 days"
 
       # Tahap 6: Build dan Push Docker Image (Memenuhi Kriteria ADVANCED)
       - name: Build and Push Docker Image
